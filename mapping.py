@@ -1,15 +1,23 @@
 import re
+import logging
 from typing import Dict, List, Optional, Tuple
 from .models import Player, PlayerMapping, FantasyProPlayer
 from .cache import cache_manager
 from services.fantasypros import fantasypros_service
 
+
 class PlayerMappingService:
     """Service for mapping league player IDs to FantasyPros slugs"""
+    
+    # Constants for name matching
+    MIN_MATCH_THRESHOLD = 0.7  # Minimum similarity threshold for auto-matching
+    TEAM_MATCH_BONUS = 0.1  # Bonus for matching teams
+    SUBSTRING_MATCH_SCORE = 0.9  # Score for substring matches (nicknames)
     
     def __init__(self):
         self.name_cache: Dict[str, str] = {}
         self.team_mappings = self._build_team_mappings()
+        self.logger = logging.getLogger(__name__)
     
     def _build_team_mappings(self) -> Dict[str, List[str]]:
         """Build team name variations for better matching"""
@@ -49,11 +57,19 @@ class PlayerMappingService:
         }
     
     def normalize_name(self, name: str) -> str:
-        """Normalize player name for matching"""
+        """
+        Normalize player name for matching with caching for performance
+        
+        Args:
+            name: Raw player name
+            
+        Returns:
+            Normalized name for matching
+        """
         if not name:
             return ""
         
-        # Cache normalized names
+        # Cache normalized names for performance
         if name in self.name_cache:
             return self.name_cache[name]
         
@@ -67,7 +83,14 @@ class PlayerMappingService:
         normalized = re.sub(r'[^\w\s]', '', normalized)
         normalized = re.sub(r'\s+', ' ', normalized).strip()
         
-        # Handle common name variations
+        # Handle common name variations for better matching
+        normalized = self._apply_name_variations(normalized)
+        
+        self.name_cache[name] = normalized
+        return normalized
+    
+    def _apply_name_variations(self, normalized: str) -> str:
+        """Apply common name variations for better matching"""
         replacements = {
             'CHRISTOPHER': 'CHRIS',
             'BENJAMIN': 'BEN',
@@ -87,7 +110,6 @@ class PlayerMappingService:
                 normalized = normalized.replace(full + ' ', short + ' ', 1)
                 break
         
-        self.name_cache[name] = normalized
         return normalized
     
     def normalize_team(self, team: str) -> str:
@@ -105,7 +127,16 @@ class PlayerMappingService:
         return team_upper
     
     def calculate_name_similarity(self, name1: str, name2: str) -> float:
-        """Calculate similarity between two names (0-1)"""
+        """
+        Calculate similarity between two names (0-1) using optimized algorithm
+        
+        Args:
+            name1: First name to compare
+            name2: Second name to compare
+            
+        Returns:
+            Similarity score between 0.0 and 1.0
+        """
         norm1 = self.normalize_name(name1)
         norm2 = self.normalize_name(name2)
         
@@ -114,7 +145,7 @@ class PlayerMappingService:
         
         # Check if one is a substring of the other (handle nicknames)
         if norm1 in norm2 or norm2 in norm1:
-            return 0.9
+            return self.SUBSTRING_MATCH_SCORE
         
         # Split into words and check overlap
         words1 = set(norm1.split())
@@ -131,42 +162,66 @@ class PlayerMappingService:
     
     def find_best_match(self, league_player: Player, 
                        fp_players: List[FantasyProPlayer]) -> Optional[FantasyProPlayer]:
-        """Find the best FantasyPros match for a league player"""
+        """
+        Find the best FantasyPros match for a league player using optimized matching
+        
+        Args:
+            league_player: Player from league roster
+            fp_players: List of FantasyPros players to match against
+            
+        Returns:
+            Best matching FantasyPros player or None if no good match found
+        """
         best_match = None
         best_score = 0.0
         
         league_team = self.normalize_team(league_player.team)
         
-        for fp_player in fp_players:
-            # Position must match exactly
-            if league_player.position != fp_player.position:
-                continue
-            
+        # Pre-filter by position for efficiency
+        position_players = [fp for fp in fp_players if fp.position == league_player.position]
+        
+        for fp_player in position_players:
             # Calculate name similarity
             name_score = self.calculate_name_similarity(league_player.name, fp_player.player_name)
             
             # Team match bonus
             fp_team = self.normalize_team(fp_player.team)
-            team_bonus = 0.1 if league_team == fp_team else 0.0
+            team_bonus = self.TEAM_MATCH_BONUS if league_team == fp_team else 0.0
             
             total_score = name_score + team_bonus
             
-            if total_score > best_score and total_score >= 0.7:  # Minimum threshold
+            if total_score > best_score and total_score >= self.MIN_MATCH_THRESHOLD:
                 best_score = total_score
                 best_match = fp_player
         
         return best_match
     
     async def map_players(self, platform: str, players: List[Player]) -> Dict[str, Optional[str]]:
-        """Map league players to FantasyPros slugs"""
+        """
+        Map league players to FantasyPros slugs with improved error handling
+        
+        Args:
+            platform: League platform (e.g., 'yahoo', 'espn')
+            players: List of players to map
+            
+        Returns:
+            Dictionary mapping player IDs to FantasyPros slugs
+        """
         mappings = {}
+        
+        if not players:
+            return mappings
         
         # Get existing mappings from cache
         for player in players:
-            existing = cache_manager.get_player_mapping(platform, player.id)
-            if existing:
-                mappings[player.id] = existing.fp_slug
-            else:
+            try:
+                existing = cache_manager.get_player_mapping(platform, player.id)
+                if existing:
+                    mappings[player.id] = existing.fp_slug
+                else:
+                    mappings[player.id] = None
+            except Exception as e:
+                self.logger.error(f"Error getting cached mapping for player {player.id}: {e}")
                 mappings[player.id] = None
         
         # Get unmapped players
@@ -181,29 +236,36 @@ class PlayerMappingService:
             fp_players = cache_manager.get_all_fantasypros_players()
             if not fp_players:
                 # Fetch from API if cache is empty
+                self.logger.info("Cache empty, fetching FantasyPros players from API")
                 fp_players = await fantasypros_service.get_ros_values()
         except Exception as e:
-            print(f"Error fetching FantasyPros players: {e}")
+            self.logger.error(f"Error fetching FantasyPros players: {e}")
             return mappings
         
         # Attempt automatic mapping
+        successful_mappings = 0
         for player in unmapped_players:
-            best_match = self.find_best_match(player, fp_players)
-            
-            if best_match:
-                # Save mapping
-                mapping = PlayerMapping(
-                    platform=platform,
-                    platform_player_id=player.id,
-                    fp_slug=best_match.fp_slug or "",
-                    player_name=player.name,
-                    position=player.position,
-                    team=player.team,
-                    manual_override=False
-                )
-                cache_manager.save_player_mapping(mapping)
-                mappings[player.id] = mapping.fp_slug
+            try:
+                best_match = self.find_best_match(player, fp_players)
+                
+                if best_match:
+                    # Save mapping
+                    mapping = PlayerMapping(
+                        platform=platform,
+                        platform_player_id=player.id,
+                        fp_slug=best_match.fp_slug or "",
+                        player_name=player.name,
+                        position=player.position,
+                        team=player.team,
+                        manual_override=False
+                    )
+                    cache_manager.save_player_mapping(mapping)
+                    mappings[player.id] = mapping.fp_slug
+                    successful_mappings += 1
+            except Exception as e:
+                self.logger.error(f"Error mapping player {player.name}: {e}")
         
+        self.logger.info(f"Successfully mapped {successful_mappings}/{len(unmapped_players)} players")
         return mappings
     
     def save_manual_mapping(self, platform: str, platform_player_id: str,
