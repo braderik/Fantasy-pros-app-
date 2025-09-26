@@ -1,7 +1,11 @@
 from typing import Dict, List, Optional, Tuple
 import math
-from .models import Player, FantasyProPlayer, RosterSlots, Scoring
-from .cache import cache_manager
+try:
+    from .models import Player, FantasyProPlayer, RosterSlots, Scoring
+    from .cache import cache_manager
+except ImportError:
+    from models import Player, FantasyProPlayer, RosterSlots, Scoring
+    from cache import cache_manager
 
 class VORCalculator:
     """Value Over Replacement calculator for fantasy football players"""

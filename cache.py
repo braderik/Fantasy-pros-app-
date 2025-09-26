@@ -3,7 +3,10 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
-from .models import PlayerMapping, CacheEntry, FantasyProPlayer
+try:
+    from .models import PlayerMapping, CacheEntry, FantasyProPlayer
+except ImportError:
+    from models import PlayerMapping, CacheEntry, FantasyProPlayer
 
 class CacheManager:
     """SQLite-based cache manager for player mappings and API responses"""
