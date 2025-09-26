@@ -1,8 +1,17 @@
 import re
 from typing import Dict, List, Optional, Tuple
-from .models import Player, PlayerMapping, FantasyProPlayer
-from .cache import cache_manager
-from services.fantasypros import fantasypros_service
+try:
+    from .models import Player, PlayerMapping, FantasyProPlayer
+    from .cache import cache_manager
+    from services.fantasypros import fantasypros_service
+except ImportError:
+    from models import Player, PlayerMapping, FantasyProPlayer
+    from cache import cache_manager
+    try:
+        from services.fantasypros import fantasypros_service
+    except ImportError:
+        # Service not available, will be handled in the code
+        fantasypros_service = None
 
 class PlayerMappingService:
     """Service for mapping league player IDs to FantasyPros slugs"""

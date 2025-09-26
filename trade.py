@@ -1,7 +1,11 @@
 from typing import List, Dict, Tuple, Optional, Set
 from itertools import combinations
-from .models import Player, Roster, TradeIdea, TradePlayer, RosterSlots, Scoring
-from .vor import vor_calculator
+try:
+    from .models import Player, Roster, TradeIdea, TradePlayer, RosterSlots, Scoring
+    from .vor import vor_calculator
+except ImportError:
+    from models import Player, Roster, TradeIdea, TradePlayer, RosterSlots, Scoring
+    from vor import vor_calculator
 
 class TradeAnalyzer:
     """Analyzes and generates fair fantasy football trade proposals"""
