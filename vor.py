@@ -3,8 +3,19 @@ import math
 from .models import Player, FantasyProPlayer, RosterSlots, Scoring
 from .cache import cache_manager
 
+
 class VORCalculator:
     """Value Over Replacement calculator for fantasy football players"""
+    
+    # Constants for VOR calculations
+    DEFAULT_BUFFER_PERCENTAGE = 0.1  # Additional percentage for replacement level
+    TE_PREMIUM_BONUS_MULTIPLIER = 0.1  # TE premium rough estimate multiplier
+    INJURY_PENALTIES = {
+        "OUT": 1.0,  # 100% penalty (no value if out)
+        "DOUBTFUL": 0.7,  # 70% penalty  
+        "QUESTIONABLE": 0.15,  # 15% penalty
+        "PROBABLE": 0.05   # 5% penalty
+    }
     
     def __init__(self):
         self.position_order = ["QB", "RB", "WR", "TE", "K", "DST"]
@@ -14,7 +25,7 @@ class VORCalculator:
                                      fp_players: List[FantasyProPlayer],
                                      roster_slots: RosterSlots,
                                      num_teams: int = 12,
-                                     buffer_percentage: float = 0.1) -> Dict[str, float]:
+                                     buffer_percentage: float = None) -> Dict[str, float]:
         """
         Calculate replacement level baselines for each position
         
@@ -23,10 +34,29 @@ class VORCalculator:
             roster_slots: League roster configuration
             num_teams: Number of teams in league
             buffer_percentage: Additional percentage of players to consider beyond starters
+            
+        Returns:
+            Dictionary mapping position to replacement baseline points
         """
+        if buffer_percentage is None:
+            buffer_percentage = self.DEFAULT_BUFFER_PERCENTAGE
+            
         baselines = {}
         
-        # Group players by position
+        # Group players by position for efficient processing
+        players_by_pos = self._group_players_by_position(fp_players)
+        
+        # Calculate baselines for each position
+        for position in self.position_order:
+            baselines[position] = self._calculate_position_baseline(
+                position, players_by_pos.get(position, []), 
+                roster_slots, num_teams, buffer_percentage
+            )
+        
+        return baselines
+    
+    def _group_players_by_position(self, fp_players: List[FantasyProPlayer]) -> Dict[str, List[FantasyProPlayer]]:
+        """Group and sort players by position for efficient processing"""
         players_by_pos = {}
         for player in fp_players:
             pos = player.position
@@ -34,40 +64,40 @@ class VORCalculator:
                 players_by_pos[pos] = []
             players_by_pos[pos].append(player)
         
-        # Sort each position by projected points
+        # Sort each position by projected points (descending)
         for pos in players_by_pos:
             players_by_pos[pos].sort(key=lambda p: p.ros_points, reverse=True)
         
-        # Calculate baselines for each position
-        for position in self.position_order:
-            if position not in players_by_pos:
-                baselines[position] = 0.0
-                continue
-            
-            # Get roster requirement for this position
-            base_starters = getattr(roster_slots, position, 0)
-            
-            # Add FLEX consideration for RB/WR/TE
-            flex_starters = 0
-            if position in self.flex_positions:
-                flex_starters = roster_slots.FLEX // len(self.flex_positions)  # Distribute FLEX evenly
-            
-            total_starters = (base_starters + flex_starters) * num_teams
-            
-            # Add buffer for replacement level
-            replacement_rank = int(total_starters * (1 + buffer_percentage))
-            
-            # Get replacement level points
-            players = players_by_pos[position]
-            if replacement_rank < len(players):
-                baselines[position] = players[replacement_rank].ros_points
-            elif players:
-                # If we don't have enough players, use the last available
-                baselines[position] = players[-1].ros_points
-            else:
-                baselines[position] = 0.0
+        return players_by_pos
+    
+    def _calculate_position_baseline(self, position: str, position_players: List[FantasyProPlayer],
+                                   roster_slots: RosterSlots, num_teams: int, 
+                                   buffer_percentage: float) -> float:
+        """Calculate baseline for a specific position"""
+        if not position_players:
+            return 0.0
         
-        return baselines
+        # Get roster requirement for this position
+        base_starters = getattr(roster_slots, position, 0)
+        
+        # Add FLEX consideration for RB/WR/TE
+        flex_starters = 0
+        if position in self.flex_positions:
+            flex_starters = roster_slots.FLEX // len(self.flex_positions)  # Distribute FLEX evenly
+        
+        total_starters = (base_starters + flex_starters) * num_teams
+        
+        # Add buffer for replacement level
+        replacement_rank = int(total_starters * (1 + buffer_percentage))
+        
+        # Get replacement level points
+        if replacement_rank < len(position_players):
+            return position_players[replacement_rank].ros_points
+        elif position_players:
+            # If we don't have enough players, use the last available
+            return position_players[-1].ros_points
+        else:
+            return 0.0
     
     def calculate_vor(self, 
                      players: List[Player],
@@ -107,9 +137,9 @@ class VORCalculator:
                 
                 # Apply TE premium if applicable
                 if te_premium and player.position == "TE":
-                    # Assume TE premium adds 0.5 points per reception
+                    # Assume TE premium adds bonus based on projected points
                     # This is a rough estimate - would need actual reception projections
-                    te_bonus = fp_player.ros_points * 0.1  # Rough estimate
+                    te_bonus = fp_player.ros_points * self.TE_PREMIUM_BONUS_MULTIPLIER
                     raw_vor += te_bonus
                 
                 vor = raw_vor
@@ -197,20 +227,23 @@ class VORCalculator:
         return total_vor
     
     def apply_injury_penalty(self, vor: float, injury_status: Optional[str]) -> float:
-        """Apply penalty for injury status"""
+        """
+        Apply penalty for injury status
+        
+        Args:
+            vor: Original VOR value
+            injury_status: Player's injury status (OUT, DOUBTFUL, QUESTIONABLE, PROBABLE)
+            
+        Returns:
+            VOR value adjusted for injury status
+        """
         if not injury_status:
             return vor
         
-        penalties = {
-            "OUT": 0.0,  # No value if out
-            "DOUBTFUL": 0.3,  # 70% penalty
-            "QUESTIONABLE": 0.15,  # 15% penalty
-            "PROBABLE": 0.05   # 5% penalty
-        }
-        
         status = injury_status.upper()
-        if status in penalties:
-            return vor * (1 - penalties[status])
+        if status in self.INJURY_PENALTIES:
+            penalty_factor = self.INJURY_PENALTIES[status]
+            return vor * (1 - penalty_factor)
         
         return vor
 
